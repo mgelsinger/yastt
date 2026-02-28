@@ -1,9 +1,11 @@
 using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
 using DictateTray.Core.Logging;
+using DictateTray.Core.Stt;
 using DictateTray.Core.Vad;
 using DictateTray.Hotkeys;
 using DictateTray.Tray;
+using System.Threading.Channels;
 
 namespace DictateTray;
 
@@ -17,6 +19,12 @@ internal sealed class StartupContext : ApplicationContext
     private readonly GlobalHotkeyManager _hotkeyManager;
     private readonly MicrophoneCaptureService _microphoneCapture;
     private readonly VadSegmenter? _vadSegmenter;
+    private readonly WhisperCliTranscriber _whisperTranscriber;
+
+    private readonly Channel<SpeechSegment> _segmentChannel;
+    private readonly CancellationTokenSource _pipelineCts;
+    private readonly Task _segmentWorker;
+    private readonly SynchronizationContext _uiContext;
 
     private readonly ToolStripMenuItem _toggleMenuItem;
     private readonly ToolStripMenuItem _autoModeItem;
@@ -32,6 +40,7 @@ internal sealed class StartupContext : ApplicationContext
         _logger = logger;
         _settingsService = settingsService;
         _settings = settings;
+        _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
         _iconSet = new TrayIconSet();
         _microphoneCapture = new MicrophoneCaptureService(_logger);
@@ -46,6 +55,15 @@ internal sealed class StartupContext : ApplicationContext
         {
             _logger.Error(ex, "VAD initialization failed. Segmentation is disabled.");
         }
+
+        _whisperTranscriber = new WhisperCliTranscriber(_logger);
+        _segmentChannel = Channel.CreateUnbounded<SpeechSegment>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
+        _pipelineCts = new CancellationTokenSource();
+        _segmentWorker = Task.Run(() => SegmentWorkerAsync(_pipelineCts.Token));
 
         _toggleMenuItem = new ToolStripMenuItem("Turn On", null, (_, _) => ToggleListening());
 
@@ -76,7 +94,7 @@ internal sealed class StartupContext : ApplicationContext
         _hotkeyManager = new GlobalHotkeyManager();
         _hotkeyManager.TogglePressed += (_, _) => ToggleListening();
         _hotkeyManager.PushToTalkPressed += (_, _) => OnPushToTalkPressed();
-        _hotkeyManager.PushToTalkReleased += (_, _) => _ = OnPushToTalkReleasedAsync();
+        _hotkeyManager.PushToTalkReleased += (_, _) => OnPushToTalkReleased();
 
         var hotkeysRegistered = _hotkeyManager.Register(_settings.Hotkeys);
         _logger.Info(hotkeysRegistered
@@ -92,12 +110,24 @@ internal sealed class StartupContext : ApplicationContext
     {
         _logger.Info("Application exiting.");
 
+        _pipelineCts.Cancel();
+        _segmentChannel.Writer.TryComplete();
+        try
+        {
+            _segmentWorker.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // Ignore shutdown races.
+        }
+
         _vadSegmenter?.Dispose();
         _microphoneCapture.Dispose();
         _hotkeyManager.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _iconSet.Dispose();
+        _pipelineCts.Dispose();
 
         base.ExitThreadCore();
     }
@@ -116,17 +146,12 @@ internal sealed class StartupContext : ApplicationContext
         UpdateTrayState();
     }
 
-    private async Task OnPushToTalkReleasedAsync()
+    private void OnPushToTalkReleased()
     {
         _pttListening = false;
         _logger.Info("Push-to-talk released.");
 
-        _busy = true;
-        UpdateTrayState();
-
         _vadSegmenter?.FinalizeNow("ptt_release");
-        await Task.Delay(250);
-        _busy = false;
         UpdateTrayState();
     }
 
@@ -203,6 +228,71 @@ internal sealed class StartupContext : ApplicationContext
     {
         _logger.Info(
             $"Segment ready: {e.Segment.DurationMs}ms [{e.Segment.FinalizeReason}] {e.Segment.WavPath}");
+        _segmentChannel.Writer.TryWrite(e.Segment);
+    }
+
+    private async Task SegmentWorkerAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var segment in _segmentChannel.Reader.ReadAllAsync(cancellationToken))
+            {
+                await RunOnUiAsync(() =>
+                {
+                    _busy = true;
+                    UpdateTrayState();
+                });
+
+                try
+                {
+                    var result = await _whisperTranscriber.TranscribeAsync(_settings, segment.WavPath, cancellationToken);
+                    if (result is null)
+                    {
+                        continue;
+                    }
+
+                    _logger.Info($"Transcription text: {result.Text}");
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, $"Transcription failed for {segment.WavPath}");
+                }
+                finally
+                {
+                    await RunOnUiAsync(() =>
+                    {
+                        _busy = false;
+                        UpdateTrayState();
+                    });
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown.
+        }
+    }
+
+    private Task RunOnUiAsync(Action action)
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _uiContext.Post(_ =>
+        {
+            try
+            {
+                action();
+                tcs.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }, null);
+        return tcs.Task;
     }
 
     private void OpenSettings()
