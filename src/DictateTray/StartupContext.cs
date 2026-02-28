@@ -1,5 +1,6 @@
 using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
+using DictateTray.Core.Insertion;
 using DictateTray.Core.Logging;
 using DictateTray.Core.Stt;
 using DictateTray.Core.Text;
@@ -24,6 +25,7 @@ internal sealed class StartupContext : ApplicationContext
     private readonly WhisperCliTranscriber _whisperTranscriber;
     private readonly TextPostProcessor _textPostProcessor;
     private readonly ForegroundProcessDetector _foregroundProcessDetector;
+    private readonly ClipboardPasteInserter _clipboardPasteInserter;
 
     private readonly Channel<SpeechSegment> _segmentChannel;
     private readonly CancellationTokenSource _pipelineCts;
@@ -63,6 +65,7 @@ internal sealed class StartupContext : ApplicationContext
         _whisperTranscriber = new WhisperCliTranscriber(_logger);
         _textPostProcessor = new TextPostProcessor();
         _foregroundProcessDetector = new ForegroundProcessDetector();
+        _clipboardPasteInserter = new ClipboardPasteInserter(_logger);
         _segmentChannel = Channel.CreateUnbounded<SpeechSegment>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -261,6 +264,14 @@ internal sealed class StartupContext : ApplicationContext
                     var post = _textPostProcessor.Process(result.Text, _settings.Mode, foregroundProcess);
                     _logger.Info(
                         $"Post-processed text ({post.EffectiveMode}, process={post.ForegroundProcess ?? "unknown"}): {post.Text}");
+
+                    if (string.IsNullOrWhiteSpace(post.Text))
+                    {
+                        continue;
+                    }
+
+                    var inserted = await _clipboardPasteInserter.InsertTextAsync(post.Text, cancellationToken);
+                    _logger.Info(inserted ? "Text insertion succeeded." : "Text insertion failed.");
                 }
                 catch (OperationCanceledException)
                 {
