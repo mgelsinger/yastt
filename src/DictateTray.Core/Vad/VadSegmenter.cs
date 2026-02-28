@@ -7,13 +7,13 @@ namespace DictateTray.Core.Vad;
 
 public sealed class VadSegmenter : IDisposable
 {
-    private const int FrameSamples = 512;
     private const float SpeechThreshold = 0.5f;
 
     private readonly object _sync = new();
     private readonly IAppLogger _logger;
     private readonly AppSettings _settings;
     private readonly SileroVadModel _model;
+    private readonly int _frameSamples;
     private readonly List<float> _pendingSamples = [];
     private readonly List<float> _segmentSamples = [];
 
@@ -28,6 +28,8 @@ public sealed class VadSegmenter : IDisposable
         _logger = logger;
 
         _model = new SileroVadModel(settings.VadModelPath, logger);
+        _frameSamples = _model.ExpectedFrameSamples;
+        _logger.Info($"VAD frame size: {_frameSamples} samples");
     }
 
     public event EventHandler<SpeechSegmentEventArgs>? SegmentFinalized;
@@ -43,10 +45,10 @@ public sealed class VadSegmenter : IDisposable
         {
             _pendingSamples.AddRange(samples);
 
-            while (_pendingSamples.Count >= FrameSamples)
+            while (_pendingSamples.Count >= _frameSamples)
             {
-                var frame = _pendingSamples.Take(FrameSamples).ToArray();
-                _pendingSamples.RemoveRange(0, FrameSamples);
+                var frame = _pendingSamples.Take(_frameSamples).ToArray();
+                _pendingSamples.RemoveRange(0, _frameSamples);
                 ProcessFrame(frame);
             }
         }

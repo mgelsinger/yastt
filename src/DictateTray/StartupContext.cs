@@ -1,5 +1,6 @@
 using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
+using DictateTray.Core.IO;
 using DictateTray.Core.Insertion;
 using DictateTray.Core.Logging;
 using DictateTray.Core.Stt;
@@ -8,6 +9,7 @@ using DictateTray.Core.Vad;
 using DictateTray.Core.Windows;
 using DictateTray.Hotkeys;
 using DictateTray.Tray;
+using NAudio.Wave;
 using System.Threading.Channels;
 
 namespace DictateTray;
@@ -40,6 +42,9 @@ internal sealed class StartupContext : ApplicationContext
     private bool _toggleListening;
     private bool _pttListening;
     private bool _busy;
+    private DateTime _lastDependencyWarningUtc = DateTime.MinValue;
+    private DateTime _lastSegmentFinalizedUtc = DateTime.MinValue;
+    private DateTime _pttPressedUtc = DateTime.MinValue;
 
     public StartupContext(IAppLogger logger, SettingsService settingsService, AppSettings settings)
     {
@@ -104,6 +109,7 @@ internal sealed class StartupContext : ApplicationContext
         RefreshModeChecks();
         UpdateTrayState();
         _logger.Info($"Settings loaded from {AppPaths.SettingsFilePath}");
+        WarnIfDependenciesMissing(forceBalloon: true);
     }
 
     protected override void ExitThreadCore()
@@ -138,6 +144,11 @@ internal sealed class StartupContext : ApplicationContext
 
     private void ToggleListening()
     {
+        if (!_toggleListening && !CanStartListening())
+        {
+            return;
+        }
+
         _toggleListening = !_toggleListening;
         _logger.Info(_toggleListening ? "Listening enabled." : "Listening disabled.");
         UpdateTrayState();
@@ -145,7 +156,13 @@ internal sealed class StartupContext : ApplicationContext
 
     private void OnPushToTalkPressed()
     {
+        if (!CanStartListening())
+        {
+            return;
+        }
+
         _pttListening = true;
+        _pttPressedUtc = DateTime.UtcNow;
         _logger.Info("Push-to-talk pressed.");
         UpdateTrayState();
     }
@@ -155,7 +172,13 @@ internal sealed class StartupContext : ApplicationContext
         _pttListening = false;
         _logger.Info("Push-to-talk released.");
 
+        var lastSegmentBeforeFinalize = _lastSegmentFinalizedUtc;
         _vadSegmenter?.FinalizeNow("ptt_release");
+        if (_lastSegmentFinalizedUtc <= lastSegmentBeforeFinalize)
+        {
+            TryFinalizePushToTalkFallbackSegment();
+        }
+
         UpdateTrayState();
     }
 
@@ -230,6 +253,7 @@ internal sealed class StartupContext : ApplicationContext
 
     private void OnSegmentFinalized(object? sender, SpeechSegmentEventArgs e)
     {
+        _lastSegmentFinalizedUtc = DateTime.UtcNow;
         _logger.Info(
             $"Segment ready: {e.Segment.DurationMs}ms [{e.Segment.FinalizeReason}] {e.Segment.WavPath}");
         _segmentChannel.Writer.TryWrite(e.Segment);
@@ -339,6 +363,8 @@ internal sealed class StartupContext : ApplicationContext
         {
             RestartPipeline();
         }
+
+        WarnIfDependenciesMissing(forceBalloon: true);
     }
 
     private void RestartPipeline()
@@ -386,5 +412,121 @@ internal sealed class StartupContext : ApplicationContext
         {
             _logger.Error(ex, "VAD initialization failed. Segmentation is disabled.");
         }
+    }
+
+    private bool CanStartListening()
+    {
+        var status = RuntimeDependencyValidator.Validate(_settings);
+        if (status.IsReady && _vadSegmenter is not null)
+        {
+            return true;
+        }
+
+        WarnIfDependenciesMissing(forceBalloon: true, status);
+        _logger.Warn("Listening start blocked: runtime dependencies are missing or invalid.");
+        return false;
+    }
+
+    private void WarnIfDependenciesMissing(bool forceBalloon = false, RuntimeDependencyStatus? status = null)
+    {
+        status ??= RuntimeDependencyValidator.Validate(_settings);
+        if (status.IsReady && _vadSegmenter is not null)
+        {
+            return;
+        }
+
+        var missing = status.MissingPaths;
+        if (_vadSegmenter is null && missing.Count == 0)
+        {
+            missing = ["Silero VAD model failed to load. Check model file and ONNX compatibility."];
+        }
+
+        foreach (var path in missing)
+        {
+            _logger.Warn($"Missing dependency: {path}");
+        }
+
+        var now = DateTime.UtcNow;
+        if (!forceBalloon && (now - _lastDependencyWarningUtc) < TimeSpan.FromSeconds(20))
+        {
+            return;
+        }
+
+        _lastDependencyWarningUtc = now;
+        var message = missing.Count > 0
+            ? $"Missing files: {string.Join("; ", missing.Take(2))}"
+            : "VAD model failed to initialize.";
+
+        _notifyIcon.BalloonTipTitle = "DictateTray Setup Required";
+        _notifyIcon.BalloonTipText = message;
+        _notifyIcon.BalloonTipIcon = ToolTipIcon.Warning;
+        _notifyIcon.ShowBalloonTip(5000);
+    }
+
+    private void TryFinalizePushToTalkFallbackSegment()
+    {
+        if (_pttPressedUtc == DateTime.MinValue || !_microphoneCapture.IsCapturing)
+        {
+            return;
+        }
+
+        var elapsedMs = (int)Math.Ceiling((DateTime.UtcNow - _pttPressedUtc).TotalMilliseconds);
+        var captureMs = Math.Clamp(elapsedMs + 250, 300, _settings.Vad.MaxSegmentMs);
+        var sampleCount = captureMs * MicrophoneCaptureService.TargetSampleRate / 1000;
+        var samples = _microphoneCapture.ReadLatestSamples(sampleCount);
+        if (samples.Length == 0)
+        {
+            return;
+        }
+
+        // Avoid transcribing pure silence from accidental hotkey presses.
+        var rms = CalculateRms(samples);
+        if (rms < 0.0035f)
+        {
+            _logger.Info($"PTT fallback dropped near-silence segment (rms={rms:F4}).");
+            return;
+        }
+
+        var segmentDirectory = Path.Combine(AppPaths.AppDataRoot, "segments");
+        Directory.CreateDirectory(segmentDirectory);
+        var segmentPath = Path.Combine(segmentDirectory, $"segment-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-ptt.wav");
+
+        using (var writer = new WaveFileWriter(
+            segmentPath,
+            WaveFormat.CreateIeeeFloatWaveFormat(MicrophoneCaptureService.TargetSampleRate, 1)))
+        {
+            writer.WriteSamples(samples, 0, samples.Length);
+            writer.Flush();
+        }
+
+        var segment = new SpeechSegment
+        {
+            WavPath = segmentPath,
+            StartUtc = DateTime.UtcNow.AddMilliseconds(-captureMs),
+            EndUtc = DateTime.UtcNow,
+            DurationMs = samples.Length * 1000 / MicrophoneCaptureService.TargetSampleRate,
+            FinalizeReason = "ptt_fallback"
+        };
+
+        _lastSegmentFinalizedUtc = DateTime.UtcNow;
+        _logger.Info($"PTT fallback segment finalized: {segment.DurationMs}ms -> {segmentPath}");
+        _segmentChannel.Writer.TryWrite(segment);
+    }
+
+    private static float CalculateRms(float[] samples)
+    {
+        if (samples.Length == 0)
+        {
+            return 0f;
+        }
+
+        double sum = 0;
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var sample = samples[i];
+            sum += sample * sample;
+        }
+
+        return (float)Math.Sqrt(sum / samples.Length);
     }
 }

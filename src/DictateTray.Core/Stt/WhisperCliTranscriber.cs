@@ -1,4 +1,5 @@
 using DictateTray.Core.Configuration;
+using DictateTray.Core.IO;
 using DictateTray.Core.Logging;
 using System.Diagnostics;
 using System.Text;
@@ -127,7 +128,9 @@ public sealed class WhisperCliTranscriber
 
             if (line.StartsWith("whisper_", StringComparison.OrdinalIgnoreCase) ||
                 line.StartsWith("main:", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("system_info", StringComparison.OrdinalIgnoreCase))
+                line.StartsWith("system_info", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("ggml_", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("device ", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -151,9 +154,7 @@ public sealed class WhisperCliTranscriber
 
     private static string ResolvePath(string path)
     {
-        return Path.IsPathRooted(path)
-            ? path
-            : Path.GetFullPath(path, AppContext.BaseDirectory);
+        return RuntimePathResolver.ResolvePath(path);
     }
 
     private static void TryKill(Process process)

@@ -11,5 +11,12 @@ obj/
 tools/models/*
 !tools/models/.gitkeep
 
+# local whisper runtime binaries are user-provided / machine-specific
+tools/whisper/*
+!tools/whisper/.gitkeep
+
+# local scratch/work directories
+.tmp/
+
 # app data artifacts
 AppData/

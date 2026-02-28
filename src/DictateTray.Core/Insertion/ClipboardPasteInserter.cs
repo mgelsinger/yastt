@@ -110,10 +110,6 @@ public sealed class ClipboardPasteInserter
             {
                 Thread.Sleep(25);
             }
-            catch (COMException)
-            {
-                Thread.Sleep(25);
-            }
             catch (ThreadStateException)
             {
                 Thread.Sleep(25);
