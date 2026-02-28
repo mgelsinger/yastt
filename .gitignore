@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# runtime data
+*.wav
+
+# local model files are large and user-provided
+tools/models/*
+!tools/models/.gitkeep
+
+# app data artifacts
+AppData/

@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictateTray", "src\DictateTray\DictateTray.csproj", "{E04EB71C-4D21-49EF-86DD-2652EC8DBBA0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictateTray.Core", "src\DictateTray.Core\DictateTray.Core.csproj", "{496C3FC5-FB49-4ACB-9B40-BEEBBC49B8CD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E04EB71C-4D21-49EF-86DD-2652EC8DBBA0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E04EB71C-4D21-49EF-86DD-2652EC8DBBA0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E04EB71C-4D21-49EF-86DD-2652EC8DBBA0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E04EB71C-4D21-49EF-86DD-2652EC8DBBA0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{496C3FC5-FB49-4ACB-9B40-BEEBBC49B8CD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{496C3FC5-FB49-4ACB-9B40-BEEBBC49B8CD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{496C3FC5-FB49-4ACB-9B40-BEEBBC49B8CD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{496C3FC5-FB49-4ACB-9B40-BEEBBC49B8CD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {12954740-C2A6-4B92-AF2C-1478299A2A3C}
+	EndGlobalSection
+EndGlobal
