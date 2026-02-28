@@ -55,6 +55,8 @@ public sealed class AppSettings
 
     public string WhisperExePath { get; set; } = Path.Combine("tools", "whisper", "whisper.exe");
 
+    public string VadModelPath { get; set; } = Path.Combine("tools", "models", "silero_vad.onnx");
+
     public VadThresholds Vad { get; set; } = new();
 
     public InsertionMethod InsertionMethod { get; set; } = InsertionMethod.Paste;

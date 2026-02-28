@@ -1,6 +1,7 @@
 using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
 using DictateTray.Core.Logging;
+using DictateTray.Core.Vad;
 using DictateTray.Hotkeys;
 using DictateTray.Tray;
 
@@ -15,6 +16,7 @@ internal sealed class StartupContext : ApplicationContext
     private readonly TrayIconSet _iconSet;
     private readonly GlobalHotkeyManager _hotkeyManager;
     private readonly MicrophoneCaptureService _microphoneCapture;
+    private readonly VadSegmenter? _vadSegmenter;
 
     private readonly ToolStripMenuItem _toggleMenuItem;
     private readonly ToolStripMenuItem _autoModeItem;
@@ -33,6 +35,17 @@ internal sealed class StartupContext : ApplicationContext
 
         _iconSet = new TrayIconSet();
         _microphoneCapture = new MicrophoneCaptureService(_logger);
+        _microphoneCapture.ChunkAvailable += OnAudioChunkAvailable;
+
+        try
+        {
+            _vadSegmenter = new VadSegmenter(_settings, _logger);
+            _vadSegmenter.SegmentFinalized += OnSegmentFinalized;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "VAD initialization failed. Segmentation is disabled.");
+        }
 
         _toggleMenuItem = new ToolStripMenuItem("Turn On", null, (_, _) => ToggleListening());
 
@@ -79,6 +92,7 @@ internal sealed class StartupContext : ApplicationContext
     {
         _logger.Info("Application exiting.");
 
+        _vadSegmenter?.Dispose();
         _microphoneCapture.Dispose();
         _hotkeyManager.Dispose();
         _notifyIcon.Visible = false;
@@ -109,6 +123,8 @@ internal sealed class StartupContext : ApplicationContext
 
         _busy = true;
         UpdateTrayState();
+
+        _vadSegmenter?.FinalizeNow("ptt_release");
         await Task.Delay(250);
         _busy = false;
         UpdateTrayState();
@@ -168,6 +184,7 @@ internal sealed class StartupContext : ApplicationContext
             }
             else if (!listening && _microphoneCapture.IsCapturing)
             {
+                _vadSegmenter?.FinalizeNow("listening_stopped");
                 _microphoneCapture.Stop();
             }
         }
@@ -175,6 +192,17 @@ internal sealed class StartupContext : ApplicationContext
         {
             _logger.Error(ex, "Failed to update capture state.");
         }
+    }
+
+    private void OnAudioChunkAvailable(object? sender, AudioChunkEventArgs e)
+    {
+        _vadSegmenter?.ProcessChunk(e.Samples);
+    }
+
+    private void OnSegmentFinalized(object? sender, SpeechSegmentEventArgs e)
+    {
+        _logger.Info(
+            $"Segment ready: {e.Segment.DurationMs}ms [{e.Segment.FinalizeReason}] {e.Segment.WavPath}");
     }
 
     private void OpenSettings()
