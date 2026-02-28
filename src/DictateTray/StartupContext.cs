@@ -21,7 +21,7 @@ internal sealed class StartupContext : ApplicationContext
     private readonly TrayIconSet _iconSet;
     private readonly GlobalHotkeyManager _hotkeyManager;
     private readonly MicrophoneCaptureService _microphoneCapture;
-    private readonly VadSegmenter? _vadSegmenter;
+    private VadSegmenter? _vadSegmenter;
     private readonly WhisperCliTranscriber _whisperTranscriber;
     private readonly TextPostProcessor _textPostProcessor;
     private readonly ForegroundProcessDetector _foregroundProcessDetector;
@@ -51,16 +51,7 @@ internal sealed class StartupContext : ApplicationContext
         _iconSet = new TrayIconSet();
         _microphoneCapture = new MicrophoneCaptureService(_logger);
         _microphoneCapture.ChunkAvailable += OnAudioChunkAvailable;
-
-        try
-        {
-            _vadSegmenter = new VadSegmenter(_settings, _logger);
-            _vadSegmenter.SegmentFinalized += OnSegmentFinalized;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "VAD initialization failed. Segmentation is disabled.");
-        }
+        RecreateVadSegmenter();
 
         _whisperTranscriber = new WhisperCliTranscriber(_logger);
         _textPostProcessor = new TextPostProcessor();
@@ -130,7 +121,11 @@ internal sealed class StartupContext : ApplicationContext
             // Ignore shutdown races.
         }
 
-        _vadSegmenter?.Dispose();
+        if (_vadSegmenter is not null)
+        {
+            _vadSegmenter.SegmentFinalized -= OnSegmentFinalized;
+            _vadSegmenter.Dispose();
+        }
         _microphoneCapture.Dispose();
         _hotkeyManager.Dispose();
         _notifyIcon.Visible = false;
@@ -317,7 +312,79 @@ internal sealed class StartupContext : ApplicationContext
 
     private void OpenSettings()
     {
-        using var settingsForm = new SettingsForm();
-        settingsForm.ShowDialog();
+        using var settingsForm = new SettingsForm(_settings);
+        if (settingsForm.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        var previousModelPath = _settings.ModelPath;
+        var previousWhisperPath = _settings.WhisperExePath;
+        var previousMode = _settings.Mode;
+
+        _settings.ModelPath = settingsForm.ModelPath;
+        _settings.WhisperExePath = settingsForm.WhisperExePath;
+        _settings.Mode = settingsForm.Mode;
+        _settingsService.Save(_settings);
+
+        RefreshModeChecks();
+        _logger.Info("Settings updated from UI.");
+
+        var changed =
+            !string.Equals(previousModelPath, _settings.ModelPath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(previousWhisperPath, _settings.WhisperExePath, StringComparison.OrdinalIgnoreCase) ||
+            previousMode != _settings.Mode;
+
+        if (changed)
+        {
+            RestartPipeline();
+        }
+    }
+
+    private void RestartPipeline()
+    {
+        try
+        {
+            var listening = _toggleListening || _pttListening;
+            if (_microphoneCapture.IsCapturing)
+            {
+                _vadSegmenter?.FinalizeNow("settings_changed");
+                _microphoneCapture.Stop();
+            }
+
+            RecreateVadSegmenter();
+
+            if (listening)
+            {
+                SyncCaptureState(true);
+            }
+
+            UpdateTrayState();
+            _logger.Info("Audio pipeline restarted after settings change.");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to restart pipeline after settings change.");
+        }
+    }
+
+    private void RecreateVadSegmenter()
+    {
+        if (_vadSegmenter is not null)
+        {
+            _vadSegmenter.SegmentFinalized -= OnSegmentFinalized;
+            _vadSegmenter.Dispose();
+            _vadSegmenter = null;
+        }
+
+        try
+        {
+            _vadSegmenter = new VadSegmenter(_settings, _logger);
+            _vadSegmenter.SegmentFinalized += OnSegmentFinalized;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "VAD initialization failed. Segmentation is disabled.");
+        }
     }
 }
