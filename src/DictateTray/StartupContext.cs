@@ -2,7 +2,9 @@ using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
 using DictateTray.Core.Logging;
 using DictateTray.Core.Stt;
+using DictateTray.Core.Text;
 using DictateTray.Core.Vad;
+using DictateTray.Core.Windows;
 using DictateTray.Hotkeys;
 using DictateTray.Tray;
 using System.Threading.Channels;
@@ -20,6 +22,8 @@ internal sealed class StartupContext : ApplicationContext
     private readonly MicrophoneCaptureService _microphoneCapture;
     private readonly VadSegmenter? _vadSegmenter;
     private readonly WhisperCliTranscriber _whisperTranscriber;
+    private readonly TextPostProcessor _textPostProcessor;
+    private readonly ForegroundProcessDetector _foregroundProcessDetector;
 
     private readonly Channel<SpeechSegment> _segmentChannel;
     private readonly CancellationTokenSource _pipelineCts;
@@ -57,6 +61,8 @@ internal sealed class StartupContext : ApplicationContext
         }
 
         _whisperTranscriber = new WhisperCliTranscriber(_logger);
+        _textPostProcessor = new TextPostProcessor();
+        _foregroundProcessDetector = new ForegroundProcessDetector();
         _segmentChannel = Channel.CreateUnbounded<SpeechSegment>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -251,7 +257,10 @@ internal sealed class StartupContext : ApplicationContext
                         continue;
                     }
 
-                    _logger.Info($"Transcription text: {result.Text}");
+                    var foregroundProcess = _foregroundProcessDetector.GetForegroundProcessName();
+                    var post = _textPostProcessor.Process(result.Text, _settings.Mode, foregroundProcess);
+                    _logger.Info(
+                        $"Post-processed text ({post.EffectiveMode}, process={post.ForegroundProcess ?? "unknown"}): {post.Text}");
                 }
                 catch (OperationCanceledException)
                 {
