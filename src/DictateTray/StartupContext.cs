@@ -1,3 +1,4 @@
+using DictateTray.Core.Audio;
 using DictateTray.Core.Configuration;
 using DictateTray.Core.Logging;
 using DictateTray.Hotkeys;
@@ -13,6 +14,7 @@ internal sealed class StartupContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly TrayIconSet _iconSet;
     private readonly GlobalHotkeyManager _hotkeyManager;
+    private readonly MicrophoneCaptureService _microphoneCapture;
 
     private readonly ToolStripMenuItem _toggleMenuItem;
     private readonly ToolStripMenuItem _autoModeItem;
@@ -30,6 +32,7 @@ internal sealed class StartupContext : ApplicationContext
         _settings = settings;
 
         _iconSet = new TrayIconSet();
+        _microphoneCapture = new MicrophoneCaptureService(_logger);
 
         _toggleMenuItem = new ToolStripMenuItem("Turn On", null, (_, _) => ToggleListening());
 
@@ -76,6 +79,7 @@ internal sealed class StartupContext : ApplicationContext
     {
         _logger.Info("Application exiting.");
 
+        _microphoneCapture.Dispose();
         _hotkeyManager.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
@@ -133,6 +137,9 @@ internal sealed class StartupContext : ApplicationContext
     private void UpdateTrayState()
     {
         var listening = _toggleListening || _pttListening;
+
+        SyncCaptureState(listening);
+
         var state = _busy
             ? TrayState.Busy
             : listening ? TrayState.On : TrayState.Off;
@@ -145,6 +152,29 @@ internal sealed class StartupContext : ApplicationContext
         };
 
         _toggleMenuItem.Text = _toggleListening ? "Turn Off" : "Turn On";
+    }
+
+    private void SyncCaptureState(bool listening)
+    {
+        try
+        {
+            if (listening && !_microphoneCapture.IsCapturing)
+            {
+                _microphoneCapture.Start(_settings.MicrophoneDeviceId, _settings.DebugWriteWav);
+                _settings.MicrophoneDeviceId = _microphoneCapture.CurrentDeviceId;
+                _settings.MicrophoneDeviceName = _microphoneCapture.CurrentDeviceName;
+                _settingsService.Save(_settings);
+                _logger.Info($"Using microphone: {_settings.MicrophoneDeviceName}");
+            }
+            else if (!listening && _microphoneCapture.IsCapturing)
+            {
+                _microphoneCapture.Stop();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to update capture state.");
+        }
     }
 
     private void OpenSettings()
